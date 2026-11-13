@@ -1,8 +1,8 @@
 # Test audit
 
-Kept by this repo's owning session, per `~/Code/CLAUDE.md`, "Test self-audits". Newest first.
+Kept by this repo's maintainers: after each feature or fix, and at least every 14 days while it changes. Newest first.
 
-## 2026-11-10: 0.1.0 (K280)
+## 2026-11-10: 0.1.0
 
 | Promise | Test |
 | --- | --- |
@@ -26,7 +26,7 @@ Kept by this repo's owning session, per `~/Code/CLAUDE.md`, "Test self-audits". 
 | A failing notice inside the caller's transaction leaves the caller's work committed | `notify > never undoes the caller's work…` |
 | Retention | `retention` |
 
-Gaps added after the security read (a subagent, Plugin Security's checklist): routing, the caller's transaction, site scoping and hidden fields above.
+Gaps added after the security read (an automated review against the plugin security checklist): routing, the caller's transaction, site scoping and hidden fields above.
 
 Gaps skipped, and why:
 - **Two runners' claims on Postgres.** Only MongoDB is tested; the README says so.

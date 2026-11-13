@@ -1,6 +1,6 @@
 # 0001: Notifications design record
 
-Status: **draft** (2026-11-10). Nothing is built yet. Task K280, P3: Guardians and the kit plugins send notices through it, so it comes first.
+Status: **draft** (2026-11-10). Nothing is built yet. Guardians and the kit plugins send notices through it, so it comes first.
 
 ## Context
 
@@ -14,7 +14,7 @@ Twelve kinds are hard-coded in a select, and their email wording sits in one map
 
 Coming next are Guardians (a suggestion waiting for the kid's answer), Sample Kits (pre-order and result notices), Shipping (tracking notices, which the owner wants sent by us rather than by the carrier, 2026-11-09) and Docs. Each would otherwise write its own emails and its own unread list.
 
-Name approved 2026-11-10 (`ops/plugin-names.md`): **Notifications**, `@extantape/payload-plugin-notifications`. MIT, as a general Payload plugin. Agnostic (D2): it imports none of our other plugins, and none of them import it.
+Name approved 2026-11-10: **Notifications**, `@extantape/payload-plugin-notifications`. MIT, as a general Payload plugin. Agnostic: it imports none of our other plugins, and none of them import it.
 
 ## Decision
 
@@ -81,7 +81,7 @@ Each notice carries its email state: `pending`, `sent`, `skipped` (with the reas
   - It isn't stored on the users collection, so the plugin adds no fields to a site's users.
 - **Read and changed only by the person and by managers** (`access.manage`, required, as in Sign-up).
 - **One switch for all email,** plus one per group. The site's page shows them, and the plugin gives `getPreferences` and `setPreference` for it.
-- **Captive Origins' existing `emailNotifications: false`** becomes "all email off" in the site switch, done once by a script the Site lead runs. It's a data step, so Seed World hears about it first (D8).
+- **Captive Origins' existing `emailNotifications: false`** becomes "all email off" in the site switch, done once by a script the site's team runs. It's a data step, so the team that keeps the site's seed data hears about it first.
 - **Digest (low priority, daily):** not in 0.1. Low-priority emails go out like the others until it exists.
 
 ## 5. Reading
@@ -109,19 +109,19 @@ Each notice carries its email state: `pending`, `sent`, `skipped` (with the reas
 
 | Plugin | Kinds | When |
 | --- | --- | --- |
-| Captive Origins site | the 12 existing kinds, moved into its config with their wording | site switch (K-task for the Site lead) |
-| Guardians | suggestion waiting, suggestion answered, link requested or ended | Guardians 0.1 (K281) |
-| Sample Kits | pre-order changed or late, results ready, kit drop-off | Sample Kits build (K74) |
-| Shipping | out for delivery, delivered, exception, return received | Shipping build (K78, K92) |
+| Captive Origins site | the 12 existing kinds, moved into its config with their wording | site switch, by the site's team |
+| Guardians | suggestion waiting, suggestion answered, link requested or ended | Guardians 0.1 |
+| Sample Kits | pre-order changed or late, results ready, kit drop-off | Sample Kits build |
+| Shipping | out for delivery, delivered, exception, return received | Shipping build |
 | Sign-up | not used: its emails go to people who don't have an account yet | — |
 
 ## The site switch (Captive Origins)
 
 - **Same slug** (`notifications`). Same fields for recipient, params, link and readAt. `kind` goes from select to text, which needs no data change in MongoDB.
 - **New fields:** the email state, attempts, nextAttemptAt, priority and dedupeKey. A new collection: `notification-preferences`.
-- **Seed World hears before the change (D8):** new fields, the preferences collection, and the `emailNotifications` move.
+- **The seed data team hears before the change:** new fields, the preferences collection, and the `emailNotifications` move.
 - The site's `notify()` becomes a thin call to the plugin. The `/my-notifications` page uses `listNotifications`, and the email switch becomes the preferences section.
-- One PR in captive-origins, owned by the Site lead. I review it.
+- One change in the site's own repo, by the site's team, reviewed by this plugin's maintainers.
 
 ## Tests (planned)
 
@@ -156,7 +156,7 @@ Each notice carries its email state: `pending`, `sent`, `skipped` (with the reas
 
 ## Open
 
-- **Push** (the PWA, P4) becomes a third channel with its own adapter, after 0.1. The data model leaves room: email state is a group, and push would get its own group.
+- **Push** (the site's installable web app, later) becomes a third channel with its own adapter, after 0.1. The data model leaves room: email state is a group, and push would get its own group.
 - **Digest** for low-priority kinds: 0.2.
 
 ## Rough time
