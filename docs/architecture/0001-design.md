@@ -4,7 +4,7 @@ Status: **draft** (2026-11-10). Nothing is built yet. Guardians and the kit plug
 
 ## Context
 
-The Captive Origins site already has on-site notifications:
+The first site already has on-site notifications:
 - `src/collections/Notifications.ts`: recipient, kind, params, link and readAt, per site.
 - `src/lib/notifications/index.ts`: `notify()`, `unreadCount()` and `markAllRead()`.
 - The `/my-notifications` page.
@@ -72,7 +72,7 @@ Each notice carries its email state: `pending`, `sent`, `skipped` (with the reas
 - **After the commit,** `notify` tries the email once.
 - **`sendPendingNotifications(payload, { limit })`** runs from the site's scheduled job, every few minutes. It picks pending emails ordered by priority (high, then normal, then low), then by age. It retries with backoff (5 min, 30 min, 2 h, 12 h). After 5 tries the email is `failed`, and the notice itself stays in the list.
 - **Each email is claimed with a conditional update** (state and attempts in the `where`) before it's sent, so two runners never send it twice.
-- **Sending goes through the site's adapter:** `sendEmail({ to, subject, text, link, kind, req })`. The default is `payload.sendEmail`. Captive Origins passes its `sendSiteEmail`, so the environment's side-effect switch and the site's branding apply. Every email ends with a link to the preferences page.
+- **Sending goes through the site's adapter:** `sendEmail({ to, subject, text, link, kind, req })`. The default is `payload.sendEmail`. The first site passes its `sendSiteEmail`, so the environment's side-effect switch and the site's branding apply. Every email ends with a link to the preferences page.
 - **Who gets an email:** the account has an email, is active (the `isActive(user)` adapter, by default true), and the person's preference for that kind is on. A required kind ignores the preference, but never the side-effect switch.
 
 ## 4. Preferences
@@ -81,7 +81,7 @@ Each notice carries its email state: `pending`, `sent`, `skipped` (with the reas
   - It isn't stored on the users collection, so the plugin adds no fields to a site's users.
 - **Read and changed only by the person and by managers** (`access.manage`, required, as in Sign-up).
 - **One switch for all email,** plus one per group. The site's page shows them, and the plugin gives `getPreferences` and `setPreference` for it.
-- **Captive Origins' existing `emailNotifications: false`** becomes "all email off" in the site switch, done once by a script the site's team runs. It's a data step, so the team that keeps the site's seed data hears about it first.
+- **The first site's existing `emailNotifications: false`** becomes "all email off" in the site switch, done once by a script the site's team runs. It's a data step, so the team that keeps the site's seed data hears about it first.
 - **Digest (low priority, daily):** not in 0.1. Low-priority emails go out like the others until it exists.
 
 ## 5. Reading
@@ -109,13 +109,13 @@ Each notice carries its email state: `pending`, `sent`, `skipped` (with the reas
 
 | Plugin | Kinds | When |
 | --- | --- | --- |
-| Captive Origins site | the 12 existing kinds, moved into its config with their wording | site switch, by the site's team |
+| The first site | the 12 existing kinds, moved into its config with their wording | site switch, by the site's team |
 | Guardians | suggestion waiting, suggestion answered, link requested or ended | Guardians 0.1 |
 | Sample Kits | pre-order changed or late, results ready, kit drop-off | Sample Kits build |
 | Shipping | out for delivery, delivered, exception, return received | Shipping build |
 | Sign-up | not used: its emails go to people who don't have an account yet | — |
 
-## The site switch (Captive Origins)
+## The site switch (the first site)
 
 - **Same slug** (`notifications`). Same fields for recipient, params, link and readAt. `kind` goes from select to text, which needs no data change in MongoDB.
 - **New fields:** the email state, attempts, nextAttemptAt, priority and dedupeKey. A new collection: `notification-preferences`.

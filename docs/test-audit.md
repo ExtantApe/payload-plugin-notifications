@@ -30,6 +30,6 @@ Gaps added after the security read (an automated review against the plugin secur
 
 Gaps skipped, and why:
 - **Two runners' claims on Postgres.** Only MongoDB is tested; the README says so.
-- **A real tenant plugin.** The test adds the site field itself; the Captive Origins site switch tests the real one.
+- **A real tenant plugin.** The test adds the site field itself; the first site's switch tests the real one.
 - **Real email.** It goes through the site's sender, which the site tests.
 - **Locales in `text`.** The plugin passes `req.locale` through; what the words are is the kind owner's job.
