@@ -2,7 +2,7 @@
 
 Notifications for Payload: in-site notices, email copies people can turn off per kind, and a retrying send queue, with kinds registered by your own code or other plugins.
 
-**Status:** 0.1.0, not on npm yet. 22 tests pass against Payload 3.92 with an in-memory MongoDB replica set. They cover the endpoints through Payload's own routing with real sign-in tokens, kinds from two owners, refusals, dedupe, the caller's transaction, logs without personal data, preferences per site, the age limit on emails, backoff, priority order, overlapping queue runs, access and retention. No site uses it yet, and no real email has been sent: the tests capture email.
+**Status:** 0.1.0, not on npm yet. 31 tests pass against Payload 3.92 with an in-memory MongoDB replica set. They cover the endpoints through Payload's own routing with real sign-in tokens, kinds from two owners, refusals, dedupe, the caller's transaction, logs without personal data, preferences per site, the age limit on emails, backoff, priority order, overlapping queue runs, access with and without a site field, rules that answer oddly or throw, who each email goes to, and retention. No site uses it yet, and no real email has been sent: the tests capture email.
 
 ## What it does
 
