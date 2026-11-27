@@ -25,6 +25,9 @@ let mongo: MongoMemoryReplSet
 const sent: { to: string; subject: string; text: string; kind: string }[] = []
 let sendFails: number | 'always' = 0
 const logs: unknown[] = []
+/** Stand-ins for a site's own rules, so a test can make them answer oddly or throw. Reset before each test. */
+let manageAs: (() => unknown) | null = null
+let activeAs: ((user: Doc) => unknown) | null = null
 
 const kinds: Record<string, NotificationKind> = {
   'transfer-offered': {
@@ -41,13 +44,13 @@ const kinds: Record<string, NotificationKind> = {
 /** Another plugin's kinds, registered after Notifications in the plugin list. */
 const other: KindRegistration = { owner: 'a made-up plugin', kinds: { 'kit-ready': { text: (p) => `Kit ${p.code} is ready`, email: (p) => ({ subject: `Kit ${p.code}`, text: 'Ready.' }) } } }
 
-const baseConfig = (extra: Partial<Parameters<typeof notificationsPlugin>[0]> = {}, plugins: ((c: Config) => Config)[] = []) =>
+const baseConfig = (extra: Partial<Parameters<typeof notificationsPlugin>[0]> = {}, plugins: ((c: Config) => Config)[] = [], database = 'notifications') =>
   buildConfig({
     secret: 'test-secret-not-for-production',
     telemetry: false,
     serverURL: 'https://site.example.com',
     typescript: { autoGenerate: false },
-    db: mongooseAdapter({ url: mongo.getUri('notifications'), ensureIndexes: true }),
+    db: mongooseAdapter({ url: mongo.getUri(database), ensureIndexes: true }),
     collections: [
       { slug: 'sites', fields: [{ name: 'name', type: 'text' }] },
       { slug: 'users', auth: true, access: { read: () => true }, fields: [{ name: 'role', type: 'text' }, { name: 'status', type: 'text' }] },
@@ -57,8 +60,8 @@ const baseConfig = (extra: Partial<Parameters<typeof notificationsPlugin>[0]> = 
     plugins: [
       notificationsPlugin({
         kinds,
-        access: { manage: ({ req }) => (req.user as { role?: string } | null)?.role === 'staff' },
-        isActive: async (u) => u.status !== 'disabled',
+        access: { manage: ({ req }) => (manageAs ? manageAs() : (req.user as { role?: string } | null)?.role === 'staff') as boolean },
+        isActive: async (u) => (activeAs ? activeAs(u) : u.status !== 'disabled') as boolean,
         sendEmail: async ({ to, subject, text, kind }) => {
           if (sendFails === 'always' || sendFails > 0) {
             if (sendFails !== 'always') sendFails--
@@ -67,7 +70,11 @@ const baseConfig = (extra: Partial<Parameters<typeof notificationsPlugin>[0]> = 
           sent.push({ to, subject, text, kind })
         },
         scopeField: 'site',
-        scopeFor: (req) => (req.headers?.get?.('x-site') as string | null) ?? null,
+        scopeFor: (req) => {
+          const site = (req.headers?.get?.('x-site') as string | null) ?? null
+          if (site === 'lookup-fails') throw new Error('made-up site lookup failure')
+          return site
+        },
         ...extra,
       }),
       (c: Config) => {
@@ -92,12 +99,13 @@ const tokenFor = async (u: Doc) => {
   return tokens.get(String(u.id))!
 }
 /** Through Payload's own routing, as a browser's request would go, with a real sign-in token. */
-const call = async (path: string, method: string, user: Doc | null, opts: { body?: unknown; site?: string; query?: string } = {}) => {
+const call = async (path: string, method: string, user: Doc | null, opts: { body?: unknown; site?: string; query?: string; token?: string; on?: Payload } = {}) => {
   const headers = new Headers({ 'content-type': 'application/json', ...(opts.site ? { 'x-site': opts.site } : {}) })
-  if (user) headers.set('Authorization', `JWT ${await tokenFor(user)}`)
+  if (opts.token) headers.set('Authorization', `JWT ${opts.token}`)
+  else if (user) headers.set('Authorization', `JWT ${await tokenFor(user)}`)
   const request = new Request(`https://site.example.com/api${path}${opts.query ?? ''}`, { method: method.toUpperCase(), headers, ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}) })
-  const res = await handleEndpoints({ config: Promise.resolve(payload.config), request } as never)
-  return { status: res.status, body: (await res.json()) as Doc }
+  const res = await handleEndpoints({ config: Promise.resolve((opts.on ?? payload).config), request, ...(opts.on ? { payloadInstanceCacheKey: 'plain' } : {}) } as never)
+  return { status: res.status, cache: res.headers.get('cache-control'), body: (await res.json().catch(() => ({}))) as Doc }
 }
 
 beforeAll(async () => {
@@ -124,6 +132,8 @@ beforeEach(() => {
   sent.length = 0
   sendFails = 0
   logs.length = 0
+  manageAs = null
+  activeAs = null
 })
 
 describe('kinds', () => {
@@ -431,5 +441,247 @@ describe('retention', () => {
     await age(docs[3]!, 10, true) // read, recent: kept
     await pruneNotifications(payload)
     expect((await notices(u.id)).map((d) => String(d.id)).sort()).toEqual([String(docs[1]!.id), String(docs[3]!.id)].sort())
+  })
+})
+
+// Added by the 2026-11-26 test audit: refusals, what an email or an answer carries, and gates that fail closed.
+describe('refusals and leaks, audited after 0.1.0', () => {
+  const due = (id: unknown) => payload.db.updateOne({ collection: 'notifications', where: { id: { equals: id } }, data: { emailNextAt: new Date(0).toISOString() } } as never)
+  const prefsOf = async (user: unknown) => (await payload.find({ collection: 'notification-preferences' as never, where: { user: { equals: user } }, depth: 0, overrideAccess: true })).docs as Doc[]
+  const routes: [string, string, unknown?][] = [
+    ['/notifications/mine', 'get'],
+    ['/notifications/unread', 'get'],
+    ['/notifications/read', 'post', { all: true }],
+    ['/notification-preferences/mine', 'get'],
+    ['/notification-preferences/mine', 'post', { key: 'all', email: false }],
+  ]
+
+  it('refuses every endpoint to a signed-out visitor, to an account from another sign-in collection, and without a site, never cacheable', async () => {
+    const a = await person()
+    await offered(a)
+    await payload.create({ collection: 'devices' as never, data: { email: 'device1@example.com', password: 'a made-up password' } as never, overrideAccess: true })
+    const device = (await payload.login({ collection: 'devices' as never, data: { email: 'device1@example.com', password: 'a made-up password' } })).token!
+    for (const [path, method, body] of routes) {
+      const refused = [
+        await call(path, method, null, { site: siteA, body }),
+        await call(path, method, null, { site: siteA, body, token: device }),
+        await call(path, method, a, { body }),
+        await call(path, method, a, { site: 'lookup-fails', body }),
+      ]
+      expect([path, method, ...refused.map((r) => r.status)]).toEqual([path, method, 401, 401, 403, 403])
+      for (const r of refused) {
+        expect(Object.keys(r.body)).toEqual(['error'])
+        expect(r.cache).toBe('no-store')
+      }
+      expect((await call(path, method, a, { site: siteA, body: method === 'get' ? undefined : {} })).cache).toBe('no-store')
+    }
+    // None of the refused posts did anything.
+    expect((await notices(a.id))[0]!.readAt ?? null).toBeNull()
+    expect(await prefsOf(a.id)).toEqual([])
+  })
+
+  it('keeps another person’s notices and preferences out of reach through the REST API, signed in or not', async () => {
+    const a = await person()
+    const b = await person()
+    await offered(a)
+    await offered(b, { params: { from: 'Someone Else', animal: 'Skink 9' } })
+    await setPreference(payload, { user: b.id, scope: siteA, key: 'all', email: false })
+    const bNotice = (await notices(b.id))[0]!
+    const bPrefs = (await prefsOf(b.id))[0]!
+    const tries = [
+      await call(`/notifications/${bNotice.id}`, 'get', a, { site: siteA }),
+      await call('/notifications', 'get', a, { site: siteA, query: `?where[recipient][equals]=${b.id}` }),
+      await call('/notifications', 'get', a, { site: siteA, query: '?limit=100&depth=2' }),
+      await call(`/notification-preferences/${bPrefs.id}`, 'get', a, { site: siteA }),
+      await call('/notification-preferences', 'get', a, { site: siteA }),
+      await call(`/notifications/${bNotice.id}`, 'get', null, { site: siteA }),
+      await call('/notifications', 'get', null, { site: siteA }),
+      await call('/notification-preferences', 'get', null, { site: siteA }),
+    ]
+    for (const r of tries) expect(JSON.stringify(r.body)).not.toMatch(new RegExp(`Someone Else|Skink 9|${bNotice.id}|${bPrefs.id}|${b.email}`))
+    expect(tries.map((r) => r.status)).toEqual([404, 200, 200, 404, 200, 403, 403, 403])
+    expect(tries[1]!.body.docs).toEqual([])
+    expect(tries[2]!.body.docs.map((d: Doc) => String(d.recipient?.id ?? d.recipient))).toEqual([String(a.id)])
+    // The delivery fields can't be read, searched or sorted on by the person, and nobody writes, a manager included.
+    expect((await call('/notifications', 'get', a, { site: siteA, query: '?where[emailStatus][equals]=sent' })).status).toBe(400)
+    expect((await call('/notifications', 'get', a, { site: siteA, query: '?sort=emailSkipReason' })).status).toBe(400)
+    const aNotice = (await notices(a.id))[0]!
+    for (const who of [a, staff]) {
+      expect((await call('/notifications', 'post', who, { site: siteA, body: { recipient: b.id, kind: 'only-on-site', site: siteA } })).status).toBe(403)
+      expect((await call(`/notifications/${aNotice.id}`, 'patch', who, { site: siteA, body: { readAt: new Date().toISOString(), params: { from: 'x', animal: 'y' } } })).status).toBe(403)
+      expect((await call(`/notifications/${aNotice.id}`, 'delete', who, { site: siteA })).status).toBe(403)
+      expect((await call(`/notification-preferences/${bPrefs.id}`, 'patch', who, { site: siteA, body: { allEmail: true } })).status).toBe(403)
+      expect((await call(`/notification-preferences/${bPrefs.id}`, 'delete', who, { site: siteA })).status).toBe(403)
+    }
+    expect(await notices(b.id)).toHaveLength(1)
+    expect((await notices(a.id))[0]).toMatchObject({ params: { from: 'Made Up', animal: 'Gecko 1' } })
+    expect((await notices(a.id))[0]!.readAt ?? null).toBeNull()
+    expect((await prefsOf(b.id))[0]!.allEmail).toBe(false)
+  })
+
+  it('marks read and changes preferences for the signed-in person on the current site only, whatever the body names', async () => {
+    const a = await person()
+    const b = await person()
+    await offered(a)
+    await notify(payload, { recipient: a.id, kind: 'only-on-site', scope: siteB })
+    await offered(b)
+    const bNotice = (await notices(b.id))[0]!
+    const elsewhere = (await notices(a.id)).find((d) => String(d.site) === siteB)!
+    expect((await call('/notifications/read', 'post', a, { site: siteA, body: { ids: [bNotice.id, elsewhere.id], user: b.id, recipient: b.id, scope: siteB } })).body).toEqual({ marked: 0 })
+    expect((await call('/notifications/read', 'post', a, { site: siteA, body: { all: true, user: b.id, recipient: b.id, scope: siteB } })).body).toEqual({ marked: 1 })
+    expect((await notices(b.id))[0]!.readAt ?? null).toBeNull()
+    expect(((await notices(a.id)).find((d) => String(d.site) === siteB)!).readAt ?? null).toBeNull()
+    // Only an `all` of exactly true marks everything.
+    await offered(a)
+    expect((await call('/notifications/read', 'post', a, { site: siteA, body: { all: 'true' } })).body).toEqual({ marked: 0 })
+    expect((await call('/notifications/unread', 'get', a, { site: siteA })).body).toEqual({ count: 1 })
+    // A preference change lands on the caller's own row for this site, not on the person the body names.
+    expect((await call('/notification-preferences/mine', 'post', a, { site: siteA, body: { key: 'all', email: false, user: b.id, scope: siteB, site: siteB } })).status).toBe(200)
+    expect(await prefsOf(b.id)).toEqual([])
+    expect((await prefsOf(a.id)).map((d) => [String(d.site), d.allEmail])).toEqual([[siteA, false]])
+    expect((await call('/notification-preferences/mine', 'get', a, { site: siteB })).body.allEmail).toBe(true)
+    expect((await call('/notification-preferences/mine', 'get', b, { site: siteA })).body.allEmail).toBe(true)
+  })
+
+  it('answers the list with its six fields only, and at most 100 notices', async () => {
+    const a = await person()
+    await offered(a, { dedupeKey: 'private-key-1' })
+    const { body } = await call('/notifications/mine', 'get', a, { site: siteA })
+    expect(Object.keys(body)).toEqual(['docs'])
+    expect(Object.keys(body.docs[0]).sort()).toEqual(['createdAt', 'id', 'kind', 'link', 'read', 'text'])
+    expect(JSON.stringify(body)).not.toMatch(new RegExp(`${a.email}|${a.id}|private-key-1|sent|${siteA}`))
+    for (let i = 0; i < 10; i++) await Promise.all(Array.from({ length: 10 }, () => notify(payload, { recipient: a.id, kind: 'only-on-site', scope: siteA })))
+    expect(await unreadCount(payload, { user: a.id, scope: siteA })).toBe(101)
+    expect((await call('/notifications/mine', 'get', a, { site: siteA, query: '?limit=1000' })).body.docs).toHaveLength(100)
+    expect(await listNotifications(payload, { user: a.id, scope: siteA, limit: 1000 })).toHaveLength(100)
+  })
+
+  it('counts only an answer of exactly true from access.manage, and refuses when it throws', async () => {
+    const a = await person()
+    const b = await person()
+    await offered(a, { dedupeKey: 'k-2' })
+    await setPreference(payload, { user: a.id, scope: siteA, key: 'all', email: false })
+    const as = (u: Doc) => ({ overrideAccess: false, depth: 0, user: { ...u, collection: 'users' } as never, req: { headers: new Headers({ 'x-site': siteA }) } as never })
+    const about = { where: { recipient: { equals: a.id } } }
+    for (const answer of [{}, { recipient: { exists: true } }, 'true', 1, null, undefined, false]) {
+      manageAs = () => answer
+      // Nobody is a manager now, the staff account included: others see nothing, and the person sees no delivery fields.
+      for (const u of [b, staff]) {
+        expect((await payload.find({ collection: 'notifications' as never, ...about, ...as(u) })).docs).toEqual([])
+        expect((await payload.find({ collection: 'notification-preferences' as never, where: { user: { equals: a.id } }, ...as(u) })).docs).toEqual([])
+      }
+      const own = (await payload.find({ collection: 'notifications' as never, ...about, ...as(a) })).docs as Doc[]
+      expect(own).toHaveLength(1)
+      expect(Object.keys(own[0]!).filter((k) => k.startsWith('email') || k === 'dedupeKey')).toEqual([])
+    }
+    manageAs = () => {
+      throw new Error('made-up rule failure')
+    }
+    for (const u of [a, b, staff]) {
+      await expect(payload.find({ collection: 'notifications' as never, ...about, ...as(u) })).rejects.toThrow('made-up rule failure')
+      await expect(payload.find({ collection: 'notification-preferences' as never, ...as(u) })).rejects.toThrow('made-up rule failure')
+    }
+    const viaRest = await call('/notifications', 'get', staff, { site: siteA })
+    expect(viaRest.status).toBeGreaterThanOrEqual(400)
+    expect(viaRest.body.docs).toBeUndefined()
+  })
+
+  it('sends each email copy to its notice’s own recipient only, carrying nobody else’s address or words', async () => {
+    const a = await person()
+    const b = await person()
+    const c = await person()
+    sendFails = 'always'
+    // Queued together, each caused by another person, and in the other order on the second site.
+    await offered(a, { actor: c.id, params: { from: 'Alpha Sender', animal: 'Gecko A' }, link: '/for-a' })
+    await offered(b, { actor: a.id, params: { from: 'Beta Sender', animal: 'Skink B' }, link: '/for-b' })
+    for (const u of [a, b]) for (const d of await notices(u.id)) await due(d.id)
+    sendFails = 0
+    await sendPendingNotifications(payload)
+    // Sent at once, outside the queue.
+    await offered(b, { actor: a.id, params: { from: 'Beta Sender', animal: 'Skink B' }, link: '/for-b' })
+    const ours = sent.filter((m) => [a.email, b.email, c.email, staff.email].includes(m.to))
+    expect(ours.map((m) => m.to)).toEqual([a.email, b.email, b.email])
+    const [toA, ...toB] = ours.map((m) => JSON.stringify(m))
+    expect(toA).toMatch(/Alpha Sender.*Gecko A.*\/for-a/)
+    expect(toA).not.toMatch(new RegExp(`Beta Sender|Skink B|/for-b|${b.email}|${c.email}|${b.id}|${c.id}`))
+    for (const m of toB) {
+      expect(m).toMatch(/Beta Sender.*Skink B.*\/for-b/)
+      expect(m).not.toMatch(new RegExp(`Alpha Sender|Gecko A|/for-a|${a.email}|${c.email}|${a.id}|${c.id}`))
+    }
+    expect(sent.every((m) => typeof m.to === 'string' && !/[,;\s]/.test(m.to))).toBe(true)
+  })
+
+  it('emails only on an isActive answer of exactly true, and sends nothing when a gate throws or the account has no address', async () => {
+    const u = await person()
+    for (const answer of ['yes', 1, {}, null, undefined, false]) {
+      activeAs = () => answer
+      await offered(u)
+      expect((await notices(u.id)).at(-1)).toMatchObject({ emailStatus: 'skipped', emailSkipReason: 'inactive account' })
+    }
+    // A rule that throws: nothing goes out, the email waits, and the log names no one.
+    activeAs = (user) => {
+      throw new Error(`made-up lookup failure for ${user.email}`)
+    }
+    await offered(u)
+    expect((await notices(u.id)).at(-1)).toMatchObject({ emailStatus: 'pending', emailAttempts: 1 })
+    // The preferences can't be read: the same.
+    activeAs = null
+    const find = payload.find.bind(payload)
+    const spy = vi.spyOn(payload, 'find').mockImplementation(((args: Doc) => (args.collection === 'notification-preferences' ? Promise.reject(new Error(`made-up database failure for ${u.email}`)) : find(args as never))) as never)
+    await offered(u)
+    spy.mockRestore()
+    expect((await notices(u.id)).at(-1)).toMatchObject({ emailStatus: 'pending', emailAttempts: 1 })
+    // An account with no address is skipped before the sender is called.
+    await payload.db.updateOne({ collection: 'users', where: { id: { equals: u.id } }, data: { email: '' } } as never)
+    await offered(u)
+    expect((await notices(u.id)).at(-1)).toMatchObject({ emailStatus: 'skipped', emailSkipReason: 'no email' })
+    expect(sent).toEqual([])
+    expect(JSON.stringify(logs)).not.toMatch(new RegExp(`${u.email}|made-up lookup failure|made-up database failure`))
+    // Once the rules answer again, the two waiting emails go out, and the skipped ones stay skipped.
+    await payload.db.updateOne({ collection: 'users', where: { id: { equals: u.id } }, data: { email: u.email } } as never)
+    for (const d of await notices(u.id)) await due(d.id)
+    await sendPendingNotifications(payload)
+    expect(sent.filter((m) => m.to === u.email)).toHaveLength(2)
+  })
+
+  it('lets another plugin send through config.custom.notifications.notify', async () => {
+    const u = await person()
+    const viaConfig = (payload.config.custom as Doc).notifications.notify as typeof notify
+    expect((await viaConfig(payload, { recipient: u.id, kind: 'kit-ready', params: { code: '77' }, scope: siteA })).outcome).toBe('stored')
+    expect(sent.map((m) => [m.to, m.subject])).toEqual([[u.email, 'Kit 77']])
+  })
+})
+
+describe('with no site field', () => {
+  let plain: Payload
+  beforeAll(async () => {
+    plain = await getPayload({ config: await baseConfig({ scopeField: undefined, scopeFor: undefined }, [], 'notifications-plain'), key: 'plain' } as never)
+  }, 120_000)
+  afterAll(async () => {
+    await plain?.db.connection?.dropDatabase?.()
+    await plain?.destroy()
+  })
+
+  it('shows a person only their own notices and preferences, and marks only their own read', async () => {
+    const make = async (email: string, role = 'member') => (await plain.create({ collection: 'users', data: { email, password: 'a made-up password', role, status: 'active' } as never, overrideAccess: true })) as Doc
+    const [a, b, boss] = [await make('plain-a@example.com'), await make('plain-b@example.com'), await make('plain-staff@example.com', 'staff')]
+    expect((await notify(plain, { recipient: a.id, kind: 'transfer-offered', params: { from: 'Made Up', animal: 'Gecko 1' } })).outcome).toBe('stored')
+    expect((await notify(plain, { recipient: b.id, kind: 'transfer-offered', params: { from: 'Someone Else', animal: 'Skink 9' } })).outcome).toBe('stored')
+    await setPreference(plain, { user: b.id, key: 'all', email: false })
+    const as = (u: Doc) => ({ overrideAccess: false, depth: 0, user: { ...u, collection: 'users' } as never })
+    const seen = async (u: Doc) => ((await plain.find({ collection: 'notifications' as never, ...as(u) })).docs as Doc[]).map((d) => String(d.recipient))
+    expect(await seen(a)).toEqual([String(a.id)])
+    expect((await seen(boss)).sort()).toEqual([String(a.id), String(b.id)].sort())
+    expect((await plain.find({ collection: 'notification-preferences' as never, ...as(a) })).docs).toEqual([])
+    await expect(plain.find({ collection: 'notifications' as never, overrideAccess: false })).rejects.toThrow(/not allowed/)
+    // The endpoints need no site here, and still answer for the caller alone.
+    const token = (await plain.login({ collection: 'users', data: { email: a.email, password: 'a made-up password' } })).token!
+    expect((await call('/notifications/mine', 'get', null, { on: plain })).status).toBe(401)
+    expect((await call('/notifications/mine', 'get', null, { on: plain, token })).body.docs.map((d: Doc) => d.text)).toEqual(['Made Up offered you Gecko 1'])
+    const bNotice = (await plain.find({ collection: 'notifications' as never, where: { recipient: { equals: b.id } }, overrideAccess: true })).docs[0] as Doc
+    expect((await call(`/notifications/${bNotice.id}`, 'get', null, { on: plain, token })).status).toBe(404)
+    expect((await call('/notifications/read', 'post', null, { on: plain, token, body: { ids: [bNotice.id] } })).body).toEqual({ marked: 0 })
+    expect((await call('/notifications/read', 'post', null, { on: plain, token, body: { all: true } })).body).toEqual({ marked: 1 })
+    expect(await unreadCount(plain, { user: b.id })).toBe(1)
   })
 })
